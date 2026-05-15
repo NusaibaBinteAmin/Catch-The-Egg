@@ -1,3 +1,4 @@
+
 #include <GL/glut.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +17,18 @@ GameState state = STATE_MENU;
 /* Timing */
 const int FPS = 60;
 const int TIMER_MS = 1000 / FPS;
+const int TIME_LIMIT_SECONDS = 60; /* total play time */
+int time_remaining = TIME_LIMIT_SECONDS;
 
+/* Basket */
+float basket_x = 280.0f;
+const float BASKET_Y = 40.0f;
+float basket_half_width = 40.0f; /* default half width */
+const float BASKET_HEIGHT = 20.0f;
+
+/* Score/highscore */
+int score_points = 0;
+int highscore = 0;
 
 
 /* Chicken (on bamboo) */
@@ -24,6 +36,11 @@ float chicken_x = 300.0f;
 float chicken_y = 620.0f;
 /* base chicken speed */
 float chicken_speed = 80.0f; /* pixels/sec moving back and forth */
+
+/* Speed progression tracking */
+int game_elapsed_ms = 0; /* accumulated ms while playing */
+int speed_stage = 0;     /* 0 = no increases yet, 1 = after 15s, 2 = after 30s, 3 = after 45s */
+
 
 
 /* Falling object types */
@@ -42,14 +59,21 @@ typedef struct {
 } FallingObj;
 
 #define MAX_OBJS 30
+FallingObj objs[MAX_OBJS];
 
+/* Difficulty / spawn control */
+int spawn_accumulator_ms = 0;
+int spawn_interval_ms = 900; /* base spawn interval */
+/* global multiplier applied to falling velocities (increases with time) */
+float global_speed_multiplier = 1.0f;
 
 /* Utility */
 void drawText(float x, float y, const char *s);
-
+void reset_game();
 void set_ortho();
 
-
+/* Random utility */
+static int rnd(int a, int b) { return a + rand() % (b - a + 1); }
 
 /* Draw simple chicken */
 void draw_chicken(float cx, float cy) {
@@ -88,21 +112,147 @@ void draw_bamboo() {
     glEnd();
 }
 
+/* Draw basket */
+void draw_basket() {
+    float w = basket_half_width;
+    float x = basket_x;
+    float y = BASKET_Y;
+    /* rim */
+    glColor3f(0.8f, 0.2f, 0.2f);
+    glBegin(GL_QUADS);
+    glVertex2f(x - w, y + 8);
+    glVertex2f(x + w, y + 8);
+    glVertex2f(x + w + 6, y);
+    glVertex2f(x - w - 6, y);
+    glEnd();
+    /* body */
+    glColor3f(0.9f, 0.5f, 0.2f);
+    glBegin(GL_QUADS);
+    glVertex2f(x - w - 6, y);
+    glVertex2f(x + w + 6, y);
+    glVertex2f(x + w, y - BASKET_HEIGHT);
+    glVertex2f(x - w, y - BASKET_HEIGHT);
+    glEnd();
+}
+
+/* Draw falling object */
+void draw_obj(const FallingObj *o) {
+    if (!o->active) return;
+    switch (o->type) {
+        case OBJ_EGG_NORMAL:
+            glColor3f(1.0f, 1.0f, 0.9f);
+            break;
+        case OBJ_EGG_BLUE:
+            glColor3f(0.3f, 0.6f, 1.0f);
+            break;
+        case OBJ_EGG_GOLD:
+            glColor3f(1.0f, 0.85f, 0.15f);
+            break;
+        case OBJ_POOP:
+            glColor3f(0.25f, 0.15f, 0.05f);
+            break;
+    }
+    /* draw as egg/poop ellipse */
+    float rx = 8.0f;
+    float ry = 12.0f;
+    glBegin(GL_POLYGON);
+    for (int i = 0; i < 24; ++i) {
+        float th = (2.0f * 3.1415926f * i) / 24.0f;
+        glVertex2f(o->x + cosf(th) * rx, o->y + sinf(th) * ry);
+    }
+    glEnd();
+}
+
+//Reset all objects inactive
+void clear_objs() {
+    for (int i = 0; i < MAX_OBJS; ++i) objs[i].active = 0;
+}
+
+/* Reset game to starting state */
+void reset_game() {
+    score_points = 0;
+    time_remaining = TIME_LIMIT_SECONDS;
+    basket_half_width = 40.0f;
+    global_speed_multiplier = 1.0f;
+    chicken_x = WIN_W * 0.5f; /* center chicken */
+    chicken_y = 620.0f;
+    chicken_speed = 80.0f; /* base automatic movement speed */
+    clear_objs();
+    spawn_accumulator_ms = 0;
+    /* place basket centered */
+    basket_x = WIN_W * 0.5f;
+
+    /* reset speed progression */
+    game_elapsed_ms = 0;
+    speed_stage = 0;
+}
 
 
 
 
 
+/* Spawn a new falling object at chicken position (x +/- small jitter)
+   Only eggs and poop spawn. */
+void spawn_from_chicken() {
+    /* find slot */
+    for (int i = 0; i < MAX_OBJS; ++i) {
+        if (!objs[i].active) {
+            objs[i].active = 1;
+            objs[i].x = chicken_x + rnd(-18, 18);
+            objs[i].y = chicken_y - 18;
+            /* decide type probabilistically (no perks) */
+            int r = rnd(1, 100);
+            if (r <= 6) {
+                objs[i].type = OBJ_EGG_GOLD; /* rare */
+                objs[i].vy = 110.0f;
+            } else if (r <= 20) {
+                objs[i].type = OBJ_EGG_BLUE;
+                objs[i].vy = 100.0f;
+            } else if (r <= 30) {
+                objs[i].type = OBJ_POOP;
+                objs[i].vy = 130.0f;
+            } else {
+                objs[i].type = OBJ_EGG_NORMAL;
+                objs[i].vy = 90.0f;
+            }
+            break;
+        }
+    }
+}
 
+/* Collision check and scoring */
+void update_collision_and_score(FallingObj *o) {
+    if (!o->active) return;
+    /* If object hit basket region */
+    float top_of_basket = BASKET_Y + 8;
+    float bottom_of_basket = BASKET_Y - BASKET_HEIGHT;
+    if (o->y <= top_of_basket && o->y >= bottom_of_basket) {
+        /* x overlap check */
+        float leftb = basket_x - basket_half_width - 6;
+        float rightb = basket_x + basket_half_width + 6;
+        if (o->x >= leftb && o->x <= rightb) {
+            /* Caught */
+            switch (o->type) {
+                case OBJ_EGG_NORMAL: score_points += 1; break;
+                case OBJ_EGG_BLUE: score_points += 5; break;
+                case OBJ_EGG_GOLD: score_points += 10; break;
+                case OBJ_POOP: score_points -= 10; break;
+            }
+            o->active = 0;
+        }
+    }
+}
 
-
-
-
-
-
-
-
-
+/* Draw HUD (score, time, highscore) */
+void draw_hud() {
+    char buf[128];
+    sprintf(buf, "Score: %d", score_points);
+    drawText(10, WIN_H - 24, buf);
+    sprintf(buf, "Time: %d", time_remaining);
+    drawText(WIN_W - 120, WIN_H - 24, buf);
+    sprintf(buf, "High: %d", highscore);
+    drawText(10, WIN_H - 44, buf);
+}
 
 /* Display callback */
 void display(void) {
@@ -124,9 +274,9 @@ void display(void) {
         drawText(WIN_W / 2 - 120, WIN_H / 2 - 20, "A/D or Left/Right keys to move basket");
         drawText(WIN_W / 2 - 120, WIN_H / 2 - 40, "P : Pause/Resume");
         drawText(WIN_W / 2 - 120, WIN_H / 2 - 60, "Catch eggs, avoid poop!");
-        //char buf[64];
-        //sprintf(buf, "High Score: %d", highscore);
-        //drawText(WIN_W / 2 - 120, WIN_H / 2 - 90, buf);
+        char buf[64];
+        sprintf(buf, "High Score: %d", highscore);
+        drawText(WIN_W / 2 - 120, WIN_H / 2 - 90, buf);
     }
     else if (state == STATE_PLAYING || state == STATE_PAUSED) {
         /* sky background */
@@ -139,6 +289,16 @@ void display(void) {
         draw_bamboo();
         draw_chicken(chicken_x, chicken_y);
 
+        /* draw falling objects */
+        for (int i = 0; i < MAX_OBJS; ++i) {
+            if (objs[i].active) draw_obj(&objs[i]);
+        }
+
+        /* draw basket */
+        draw_basket();
+
+        /* HUD */
+        draw_hud();
 
     }
 
@@ -162,13 +322,15 @@ void update_game(int value) {
     int now = glutGet(GLUT_ELAPSED_TIME);
     if (!initialized) { last_time = now; initialized = 1; }
     int dt_ms = now - last_time;
-    //if (dt_ms > 1000) dt_ms = TIMER_MS; /* avoid huge jumps */
+
     last_time = now;
 
     if (state == STATE_PLAYING) {
         /* accumulate elapsed time for speed progression */
         //game_elapsed_ms += dt_ms;
 
+        /* check speed milestones: 15s, 30s, 45s
+           when hitting a milestone, increase both chicken speed and falling speed multiplier */
 
 
         /* update chicken automatic movement */
@@ -184,10 +346,41 @@ void update_game(int value) {
             chicken_speed = -fabs(chicken_speed);
         }
 
+        /* spawn accumulator */
+        spawn_accumulator_ms += dt_ms;
+        /* make spawn_interval slightly shorter with higher score */
+        int effective_spawn = spawn_interval_ms;
+        if (score_points >= 30) effective_spawn = 550;
+        else if (score_points >= 15) effective_spawn = 730;
+        if (spawn_accumulator_ms >= effective_spawn) {
+            spawn_accumulator_ms = 0;
+            spawn_from_chicken();
+        }
 
+        /* update falling objects */
+        for (int i = 0; i < MAX_OBJS; ++i) {
+            if (!objs[i].active) continue;
+            /* apply global speed multiplier to the object's vy */
+            objs[i].y -= objs[i].vy * dt * global_speed_multiplier;
+            /* check collision with basket */
+            update_collision_and_score(&objs[i]);
+            /* if below screen, deactivate */
+            if (objs[i].y < -20) objs[i].active = 0;
+        }
 
+        /* time remaining */
+        static int time_accum = 0;
+        time_accum += dt_ms;
+        if (time_accum >= 1000) {
+            time_accum -= 1000;
+            time_remaining -= 1;
+            if (time_remaining <= 0) {
+                time_remaining = 0;
+                /* game over */
 
-
+                state = STATE_GAMEOVER;
+            }
+        }
     }
 
     /* redisplay and rearm timer */
@@ -223,8 +416,6 @@ void keyboard(unsigned char key, int x, int y) {
 
 
 
-
-
 /* Update ortho projection */
 void set_ortho() {
     glMatrixMode(GL_PROJECTION);
@@ -253,10 +444,9 @@ int main(int argc, char **argv) {
 
     glutKeyboardFunc(keyboard);
 
-
     glutTimerFunc(TIMER_MS, update_game, 0);
 
-
+    reset_game();
     glutMainLoop();
     return 0;
 }
