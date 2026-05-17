@@ -1,4 +1,3 @@
-
 #include <GL/glut.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +28,7 @@ const float BASKET_HEIGHT = 20.0f;
 /* Score/highscore */
 int score_points = 0;
 int highscore = 0;
-
+const char *HIGHSCORE_FILE = "highscore.dat";
 
 /* Chicken (on bamboo) */
 float chicken_x = 300.0f;
@@ -41,7 +40,8 @@ float chicken_speed = 80.0f; /* pixels/sec moving back and forth */
 int game_elapsed_ms = 0; /* accumulated ms while playing */
 int speed_stage = 0;     /* 0 = no increases yet, 1 = after 15s, 2 = after 30s, 3 = after 45s */
 
-
+/* Factor applied at each milestone to both chicken and egg speeds */
+const float SPEED_INCREASE_FACTOR = 1.25f;
 
 /* Falling object types */
 typedef enum {
@@ -70,6 +70,9 @@ float global_speed_multiplier = 1.0f;
 /* Utility */
 void drawText(float x, float y, const char *s);
 void reset_game();
+void load_highscore();
+void save_highscore();
+void spawn_from_chicken();
 void set_ortho();
 
 /* Random utility */
@@ -163,7 +166,7 @@ void draw_obj(const FallingObj *o) {
     glEnd();
 }
 
-//Reset all objects inactive
+/* Reset all objects inactive */
 void clear_objs() {
     for (int i = 0; i < MAX_OBJS; ++i) objs[i].active = 0;
 }
@@ -187,9 +190,24 @@ void reset_game() {
     speed_stage = 0;
 }
 
+/* Load highscore from file */
+void load_highscore() {
+    FILE *f = fopen(HIGHSCORE_FILE, "rb");
+    if (!f) { highscore = 0; return; }
+    if (fread(&highscore, sizeof(int), 1, f) != 1) highscore = 0;
+    fclose(f);
+}
 
-
-
+/* Save highscore to file */
+void save_highscore() {
+    if (score_points > highscore) {
+        highscore = score_points;
+        FILE *f = fopen(HIGHSCORE_FILE, "wb");
+        if (!f) return;
+        fwrite(&highscore, sizeof(int), 1, f);
+        fclose(f);
+    }
+}
 
 /* Spawn a new falling object at chicken position (x +/- small jitter)
    Only eggs and poop spawn. */
@@ -277,8 +295,7 @@ void display(void) {
         char buf[64];
         sprintf(buf, "High Score: %d", highscore);
         drawText(WIN_W / 2 - 120, WIN_H / 2 - 90, buf);
-    }
-    else if (state == STATE_PLAYING || state == STATE_PAUSED) {
+    } else if (state == STATE_PLAYING || state == STATE_PAUSED) {
         /* sky background */
         glColor3f(0.6f, 0.9f, 1.0f);
         glBegin(GL_QUADS);
@@ -300,8 +317,26 @@ void display(void) {
         /* HUD */
         draw_hud();
 
-    }
+        if (state == STATE_PAUSED) {
+            glColor3f(0, 0, 0);
+            drawText(WIN_W / 2 - 40, WIN_H / 2, "PAUSED");
+            drawText(WIN_W / 2 - 100, WIN_H / 2 - 20, "Press P to resume");
+        }
+    } else if (state == STATE_GAMEOVER) {
+        glColor3f(0.2f, 0.2f, 0.3f);
+        glBegin(GL_QUADS);
+        glVertex2f(0, 0); glVertex2f(WIN_W, 0); glVertex2f(WIN_W, WIN_H); glVertex2f(0, WIN_H);
+        glEnd();
 
+        char buf[128];
+        sprintf(buf, "Game Over");
+        drawText(WIN_W / 2 - 50, WIN_H / 2 + 40, buf);
+        sprintf(buf, "Score: %d", score_points);
+        drawText(WIN_W / 2 - 50, WIN_H / 2 + 10, buf);
+        sprintf(buf, "High: %d", highscore);
+        drawText(WIN_W / 2 - 50, WIN_H / 2 - 20, buf);
+        drawText(WIN_W / 2 - 120, WIN_H / 2 - 60, "S : Restart    M : Menu    Q/ESC : Quit");
+    }
 
     glutSwapBuffers();
 }
@@ -322,16 +357,28 @@ void update_game(int value) {
     int now = glutGet(GLUT_ELAPSED_TIME);
     if (!initialized) { last_time = now; initialized = 1; }
     int dt_ms = now - last_time;
-
+    if (dt_ms > 1000) dt_ms = TIMER_MS; /* avoid huge jumps */
     last_time = now;
 
     if (state == STATE_PLAYING) {
         /* accumulate elapsed time for speed progression */
-        //game_elapsed_ms += dt_ms;
+        game_elapsed_ms += dt_ms;
 
         /* check speed milestones: 15s, 30s, 45s
            when hitting a milestone, increase both chicken speed and falling speed multiplier */
-
+        if (speed_stage == 0 && game_elapsed_ms >= 15000) {
+            chicken_speed *= SPEED_INCREASE_FACTOR;
+            global_speed_multiplier *= SPEED_INCREASE_FACTOR;
+            speed_stage = 1;
+        } else if (speed_stage == 1 && game_elapsed_ms >= 30000) {
+            chicken_speed *= SPEED_INCREASE_FACTOR;
+            global_speed_multiplier *= SPEED_INCREASE_FACTOR;
+            speed_stage = 2;
+        } else if (speed_stage == 2 && game_elapsed_ms >= 45000) {
+            chicken_speed *= SPEED_INCREASE_FACTOR;
+            global_speed_multiplier *= SPEED_INCREASE_FACTOR;
+            speed_stage = 3;
+        }
 
         /* update chicken automatic movement */
         float dt = dt_ms / 1000.0f;
@@ -377,7 +424,7 @@ void update_game(int value) {
             if (time_remaining <= 0) {
                 time_remaining = 0;
                 /* game over */
-
+                save_highscore();
                 state = STATE_GAMEOVER;
             }
         }
@@ -392,29 +439,73 @@ void update_game(int value) {
 void keyboard(unsigned char key, int x, int y) {
     if (state == STATE_MENU) {
         if (key == 's' || key == 'S') {
-            //reset_game();
+            reset_game();
             state = STATE_PLAYING;
         } else if (key == 'q' || key == 'Q' || key == 27) {
-
+            save_highscore();
             exit(0);
         }
-    }
-
-    else if (state == STATE_PAUSED) {
+    } else if (state == STATE_PLAYING) {
+        if (key == 'p' || key == 'P') {
+            state = STATE_PAUSED;
+        } else if (key == 'q' || key == 'Q' || key == 27) {
+            save_highscore();
+            exit(0);
+        } else if (key == 'a' || key == 'A') {
+            /* Move basket left */
+            basket_x -= 20; if (basket_x < 20) basket_x = 20;
+        } else if (key == 'd' || key == 'D') {
+            /* Move basket right */
+            basket_x += 20; if (basket_x > WIN_W - 20) basket_x = WIN_W - 20;
+        }
+    } else if (state == STATE_PAUSED) {
         if (key == 'p' || key == 'P') {
             state = STATE_PLAYING;
         } else if (key == 'q' || key == 'Q' || key == 27) {
-
+            save_highscore();
             exit(0);
         } else if (key == 'm' || key == 'M') {
             state = STATE_MENU;
         }
-
+    } else if (state == STATE_GAMEOVER) {
+        if (key == 's' || key == 'S') {
+            reset_game();
+            state = STATE_PLAYING;
+        } else if (key == 'm' || key == 'M') {
+            state = STATE_MENU;
+        } else if (key == 'q' || key == 'Q' || key == 27) {
+            save_highscore();
+            exit(0);
+        }
     }
 }
 
+/* Special keys for basket movement (Left/Right arrows) */
+void special_keys(int key, int x, int y) {
+    if (state == STATE_PLAYING) {
+        if (key == GLUT_KEY_LEFT) { basket_x -= 20; if (basket_x < 20) basket_x = 20; }
+        if (key == GLUT_KEY_RIGHT) { basket_x += 20; if (basket_x > WIN_W - 20) basket_x = WIN_W - 20; }
+    }
+}
 
+/* Mouse passive motion to control basket */
+void passive_mouse(int x, int y) {
+    /* convert window coords (origin top-left) to our ortho (origin bottom-left) */
+    int ny = WIN_H - y;
+    (void)ny; /* ny not used but kept for clarity */
+    basket_x = (float)x;
+    /* clamp */
+    if (basket_x < 20) basket_x = 20;
+    if (basket_x > WIN_W - 20) basket_x = WIN_W - 20;
+    glutPostRedisplay();
+}
 
+/* Window reshape */
+void reshape(int w, int h) {
+    WIN_W = w; WIN_H = h;
+    glViewport(0, 0, w, h);
+    set_ortho();
+}
 
 /* Update ortho projection */
 void set_ortho() {
@@ -434,20 +525,20 @@ void init_gl() {
 /* Entry point */
 int main(int argc, char **argv) {
     srand((unsigned int)time(NULL));
-
+    load_highscore();
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
     glutInitWindowSize(WIN_W, WIN_H);
     glutCreateWindow("Egg Catcher - GLUT Game (speed-up at 15/30/45s)");
     init_gl();
     glutDisplayFunc(display);
-
+    glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
-
+    glutSpecialFunc(special_keys);
+    glutPassiveMotionFunc(passive_mouse);
     glutTimerFunc(TIMER_MS, update_game, 0);
 
     reset_game();
     glutMainLoop();
     return 0;
 }
-
