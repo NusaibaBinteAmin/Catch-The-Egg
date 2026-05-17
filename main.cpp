@@ -523,6 +523,7 @@ void init_gl() {
 }
 
 /* Entry point */
+/* Main Function */
 int main(int argc, char **argv) {
     srand((unsigned int)time(NULL));
     load_highscore();
